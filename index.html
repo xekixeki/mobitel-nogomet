@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Mobilni Nogomet 1v1</title>
+  <!-- PeerJS za P2P komunikaciju u stvarnom vremenu -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none; /* Sprječava zumiranje i skrolanje na mobitelu */
+    }
+    body {
+      background-color: #1a1a1a;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #lobby {
+      position: absolute;
+      z-index: 10;
+      background: rgba(20, 20, 20, 0.95);
+      padding: 24px;
+      border-radius: 16px;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      width: 85%;
+      max-width: 320px;
+    }
+    h2 { margin-bottom: 12px; color: #4ade80; }
+    p { font-size: 14px; margin-bottom: 16px; color: #aaa; }
+    .code-box {
+      font-size: 28px;
+      font-weight: bold;
+      letter-spacing: 4px;
+      background: #2a2a2a;
+      padding: 10px;
+      border-radius: 8px;
+      margin: 10px 0;
+      color: #facc15;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border-radius: 8px;
+      border: 1px solid #444;
+      background: #333;
+      color: #fff;
+      text-align: center;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+    }
+    button {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      font-weight: bold;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:active { background: #1d4ed8; }
+    #scoreboard {
+      position: absolute;
+      top: 10px;
+      font-size: 24px;
+      font-weight: bold;
+      z-index: 5;
+      display: flex;
+      gap: 20px;
+      background: rgba(0,0,0,0.5);
+      padding: 6px 16px;
+      border-radius: 20px;
+    }
+    .score-p1 { color: #ef4444; }
+    .score-p2 { color: #3b82f6; }
+    canvas {
+      background: #2e7d32;
+      border: 3px solid #fff;
+      border-radius: 12px;
+      box-shadow: 0 0 20px rgba(0,0,0,0.6);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Scoreboard -->
+  <div id="scoreboard">
+    <span class="score-p1" id="score1">0</span>
+    <span>:</span>
+    <span class="score-p2" id="score2">0</span>
+  </div>
+
+  <!-- Lobby / Povezivanje -->
+  <div id="lobby">
+    <h2>Nogomet 1v1</h2>
+    <p>Igrač 1 (Domaćin): Pošalji ovaj kod prijatelju:</p>
+    <div class="code-box" id="my-id">...</div>
+    <hr style="border: 0; border-top: 1px solid #444; margin: 16px 0;">
+    <p>Igrač 2 (Gost): Upiši kod prijatelja:</p>
+    <input type="text" id="join-id" placeholder="Npr. 4281" maxlength="4">
+    <button onclick="connectToPeer()">Spoji se i igraj</button>
+  </div>
+
+  <!-- Teren -->
+  <canvas id="gameCanvas" width="360" height="600"></canvas>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // Dimenzije terena
+    const W = canvas.width;
+    const H = canvas.height;
+    const GOAL_WIDTH = 120;
+
+    // Stanje igre
+    let isHost = false;
+    let conn = null;
+    let score = { p1: 0, p2: 0 };
+
+    // Objekti: P1 (Domaćin - dolje, crveni), P2 (Gost - gore, plavi), Lopta
+    const p1 = { x: W / 2, y: H - 80, r: 24, color: "#ef4444" };
+    const p2 = { x: W / 2, y: 80, r: 24, color: "#3b82f6" };
+    const ball = { x: W / 2, y: H / 2, r: 12, vx: 0, vy: 0, color: "#ffffff" };
+
+    // Nasumični 4-znamenkasti ID
+    const randomId = Math.floor(1000 + Math.random() * 9000).toString();
+    const peer = new Peer("soc-" + randomId);
+
+    peer.on('open', (id) => {
+      document.getElementById('my-id').innerText = id.replace("soc-", "");
+    });
+
+    // Ako je netko spojio na nas (mi smo Host)
+    peer.on('connection', (c) => {
+      isHost = true;
+      conn = c;
+      setupConnection();
+    });
+
+    // Povezivanje gosta na domaćina
+    function connectToPeer() {
+      const targetId = document.getElementById('join-id').value.trim();
+      if (!targetId) return;
+      isHost = false;
+      conn = peer.connect("soc-" + targetId);
+      setupConnection();
+    }
+
+    function setupConnection() {
+      conn.on('open', () => {
+        document.getElementById('lobby').style.display = 'none';
+        if (isHost) {
+          requestAnimationFrame(gameLoop);
+        }
+      });
+
+      conn.on('data', (data) => {
+        if (isHost) {
+          // Host prima unos (koordinate) od gosta (P2)
+          // Invertiramo Y os jer gost gleda teren iz svoje perspektive (odozdo prema gore)
+          if (data.type === 'input') {
+            p2.x = W - data.x;
+            p2.y = H - data.y;
+          }
+        } else {
+          // Gost prima stanje cijele fizike od hosta
+          if (data.type === 'state') {
+            // Gostu okrećemo teren za 180° tako da se i on uvijek nalazi na donjoj polovici ekrana!
+            ball.x = W - data.ball.x;
+            ball.y = H - data.ball.y;
+            p1.x = W - data.p1.x;
+            p1.y = H - data.p1.y;
+            p2.x = W - data.p2.x;
+            p2.y = H - data.p2.y;
+            score = data.score;
+            updateScoreUI();
+            draw();
+          }
+        }
+      });
+    }
+
+    // Dodirni unos za mobitele (Touch Controls)
+    function handleTouch(e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+
+      const touch = e.touches[0];
+      const targetX = (touch.clientX - rect.left) * scaleX;
+      const targetY = (touch.clientY - rect.top) * scaleY;
+
+      // Igrač može micati samo svoju figuricu i to samo na svojoj (donjoj) polovici
+      const clampedY = Math.max(H / 2 + 30, Math.min(H - p1.r, targetY));
+      const clampedX = Math.max(p1.r, Math.min(W - p1.r, targetX));
+
+      if (isHost) {
+        p1.x = clampedX;
+        p1.y = clampedY;
+      } else if (conn && conn.open) {
+        conn.send({ type: 'input', x: clampedX, y: clampedY });
+      }
+    }
+
+    canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handleTouch(e); }, { passive: false });
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handleTouch(e); }, { passive: false });
+
+    // Fizika (računa samo Host kako bi bila sinkronizirana)
+    function updatePhysics() {
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+
+      // Trenje lopte
+      ball.vx *= 0.985;
+      ball.vy *= 0.985;
+
+      // Odbijanje od lijevog i desnog ruba
+      if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx *= -0.8; }
+      if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.vx *= -0.8; }
+
+      // Golovi i gornji/donji rubovi
+      const inGoalX = ball.x > (W - GOAL_WIDTH) / 2 && ball.x < (W + GOAL_WIDTH) / 2;
+
+      // Gornji gol (Zabio P1)
+      if (ball.y - ball.r < 0) {
+        if (inGoalX) {
+          score.p1++;
+          resetBall();
+        } else {
+          ball.y = ball.r;
+          ball.vy *= -0.8;
+        }
+      }
+
+      // Donji gol (Zabio P2)
+      if (ball.y + ball.r > H) {
+        if (inGoalX) {
+          score.p2++;
+          resetBall();
+        } else {
+          ball.y = H - ball.r;
+          ball.vy *= -0.8;
+        }
+      }
+
+      // Kolizije lopte s igračima
+      checkCollision(p1);
+      checkCollision(p2);
+
+      // Pošalji stanje gostu
+      if (conn && conn.open) {
+        conn.send({
+          type: 'state',
+          ball: { x: ball.x, y: ball.y },
+          p1: { x: p1.x, y: p1.y },
+          p2: { x: p2.x, y: p2.y },
+          score: score
+        });
+      }
+      updateScoreUI();
+    }
+
+    function checkCollision(p) {
+      let dx = ball.x - p.x;
+      let dy = ball.y - p.y;
+      let dist = Math.hypot(dx, dy);
+
+      if (dist < ball.r + p.r) {
+        let angle = Math.atan2(dy, dx);
+        let speed = Math.hypot(ball.vx, ball.vy) + 4;
+        speed = Math.min(speed, 14); // maksimalna brzina
+
+        ball.vx = Math.cos(angle) * speed;
+        ball.vy = Math.sin(angle) * speed;
+
+        // Izvuci loptu iz igrača
+        ball.x = p.x + Math.cos(angle) * (ball.r + p.r);
+        ball.y = p.y + Math.sin(angle) * (ball.r + p.r);
+      }
+    }
+
+    function resetBall() {
+      ball.x = W / 2;
+      ball.y = H / 2;
+      ball.vx = 0;
+      ball.vy = 0;
+    }
+
+    function updateScoreUI() {
+      document.getElementById('score1').innerText = score.p1;
+      document.getElementById('score2').innerText = score.p2;
+    }
+
+    // Crtanje terena i elemenata
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+
+      // Oznake na terenu
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 3;
+
+      // Središnja crta i krug
+      ctx.beginPath();
+      ctx.moveTo(0, H / 2);
+      ctx.lineTo(W, H / 2);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(W / 2, H / 2, 45, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Golovi
+      ctx.strokeStyle = "#facc15";
+      ctx.lineWidth = 6;
+      // Gornji gol
+      ctx.strokeRect((W - GOAL_WIDTH) / 2, 0, GOAL_WIDTH, 4);
+      // Donji gol
+      ctx.strokeRect((W - GOAL_WIDTH) / 2, H - 4, GOAL_WIDTH, 4);
+
+      // Igrači
+      drawDisc(p1.x, p1.y, p1.r, p1.color);
+      drawDisc(p2.x, p2.y, p2.r, p2.color);
+
+      // Lopta
+      drawDisc(ball.x, ball.y, ball.r, ball.color, "#333");
+    }
+
+    function drawDisc(x, y, r, color, stroke = "#fff") {
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = stroke;
+      ctx.stroke();
+    }
+
+    function gameLoop() {
+      if (isHost) {
+        updatePhysics();
+        draw();
+        requestAnimationFrame(gameLoop);
+      }
+    }
+  </script>
+</body>
+</html>
